@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maf-codex-adapter"
+version = "0.0.1"
+description = "A local Codex SDK agent for Microsoft Agent Framework"
+requires-python = ">=3.12"
+dependencies = [
+    "agent-framework-core==1.21.0",
+    "openai-codex==0.162.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "ruff==0.17.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
