@@ -18,7 +18,8 @@
 ## Створення агента
 
 ```python
-CodexAgent(config, *, id=None, name="Codex", description=None, runtime=None)
+CodexAgent(config, *, id=None, name="Codex", description=None, runtime=None,
+           middleware=None, context_providers=None, tools=None, approval_handler=None)
 ```
 
 | Поле | Поточний контракт |
@@ -27,9 +28,12 @@ CodexAgent(config, *, id=None, name="Codex", description=None, runtime=None)
 | `id` | Унікальний id у межах спільної сесії; без значення MAF створює UUID. Для відновлення потрібен стабільний id |
 | `name`, `description` | Метадані MAF; зміна імені не створює нової розмови |
 | `runtime` | Точка підміни для тестування. Ін'єктований runtime має дотримуватися контракту SDK boundary; штатний шлях — `CodexRuntime(config)` |
+| `tools` | Callable FunctionTool registry; dynamic tools мають experimental статус. Див. tools.md |
+| `approval_handler` | Async callback ApprovalRequest → approve/reject/cancel. Немає persistent grants |
 
-`middleware`, `context_providers`, lifecycle/context-manager аргументи не
-підключені до цього конструктора. Успадковані можливості `BaseAgent`, які не
+`middleware` підтримує agent-level MAF middleware; `context_providers` — текстові
+contributions та lifecycle ContextProvider. Межі описані у [pipeline.md](pipeline.md).
+Lifecycle/context-manager аргументи не підключені. Успадковані можливості `BaseAgent`, які не
 перелічено як підтверджені в матриці, не входять у гарантований контракт.
 
 ## Конфігурація
@@ -51,13 +55,15 @@ Fingerprint охоплює нормалізований `cwd`, instructions, з�
 codex_bin. Timeout, history mode і метадані агента до нього не входять; mode
 перевіряється окремо у binding. Ефективна модель при
 `model=None`, конфігурація Codex на диску та версія executable не фіксуються цим
-fingerprint: їх зміна поза адаптером не відхиляється автоматично.
+fingerprint. Окремо зберігається відома configured model з bootstrap SDK; drift
+на resume відхиляється до turn/start. Executable/config changes не повністю
+покриваються цим guard; деталі — metadata.md.
 
 ## Виклик і вхідні повідомлення
 
 ```python
-await agent.run(messages, *, stream=False, session=None)
-agent.run(messages, *, stream=True, session=None)  # ResponseStream
+await agent.run(messages, *, stream=False, session=None, middleware=None, options=None, tools=None)
+agent.run(messages, *, stream=True, session=None, middleware=None, options=None, tools=None)  # ResponseStream
 ```
 
 - Підтримуються `str`, `Message`, послідовність рядків/повідомлень.
@@ -86,8 +92,11 @@ prefix, не сумісна з full режимом.
 
 MAF `AgentExecutor` може передавати `function_invocation_kwargs` і `client_kwargs`.
 Значення `None`/`{}` допускаються для сумісності; непорожні значення та будь-які
-інші run options (зокрема `tools`, `model`, `response_format`) відхиляються через
+інші run options (зокрема `model`, `response_format`) відхиляються через
 `TypeError`. Вибір model зараз задається лише конфігурацією агента.
+Підтримано run-level agent middleware, `options={"instructions": str}` і `tools=[FunctionTool, ...]`.
+Constructor tools є default; run tools замінюють їх; provider tools додаються. Деталі — [tools.md](tools.md).
+Текстовий вхід перевіряється ще раз після middleware/provider mutations.
 
 Перевірка входу й опцій виконується одразу в `run()`, ще до await/ітерації.
 Перевірка state, авторизація та помилки виконання виникають при await або
@@ -105,12 +114,15 @@ MAF `AgentExecutor` може передавати `function_invocation_kwargs` �
 | `response_id` | Codex turn id |
 | `additional_properties["codex_thread_id"]` | Codex thread id |
 
-Usage, model, finish reason, tool items і структуроване `value` не заповнюються.
+UsageDetails заповнюється з підтвердженого SDK counter delta або лишається None.
+additional_properties.codex містить raw usage report, status/timing, requested/configured model
+та safe item summaries; див. [metadata.md](metadata.md). Native finish reason і
+структуроване value не виводяться з цих даних.
 Успіх — status `completed` і непорожній за truthiness `final_response`.
 Порожній рядок/`None` відхиляються; лише whitespace-відповідь наразі не відхиляється.
 
-`stream=True` є буферизованим: один `AgentResponseUpdate` після завершення всього
-turn. Його споживання та `get_final_response()` мають повертати ту саму відповідь
+`stream=True` є буферизованим: update для кожного фінального повідомлення після
+завершення turn. Без output transforms це один update. Споживання та `get_final_response()` мають повертати ту саму відповідь
 й ідентифікатори. Частковий текст і проміжні події не передаються.
 
 ## Сесії та конкурентність
@@ -129,7 +141,9 @@ session.state["maf_codex"][agent.id] = {
 У full режимі binding також містить `history` (текстові role/author/text записи)
 та `pending`. Це збільшує snapshot MAF: він містить текст розмови, хоча історія
 внутрішніх інструментів і модельний контекст залишаються у Codex. Після успіху
-history містить вхідний snapshot і відповідь агента; pending стає false.
+history містить caller input та видимий результат middleware; provider context
+не входить до prefix. Pending стає false після успіху SDK та фінального
+непорожнього результату pipeline.
 
 Перший запуск створює thread; наступний відновлює його. Прив'язка записується
 перед запуском turn та зберігається навіть після помилки. Pending full binding
@@ -148,7 +162,8 @@ JSON snapshot недостатньо для перенесення історі�
 
 Одночасні виклики для одного agent id та session id серіалізуються між екземплярами
 агента в одному event loop. Locks не синхронізують різні event loops/процеси або
-два різні session id, що посилаються на той самий provider thread.
+два різні session id на pipeline рівні. Окремий runtime thread lease у цьому
+event loop відхиляє одночасні запуски одного provider thread через ThreadBusyError.
 Прив'язка є довіреним станом застосунку, а не межею доступу між користувачами.
 Неверсіонований старий incremental binding приймається та оновлюється до version 1
 під час прив'язки runtime. Невідомі/некоректні версії й зміна history mode відхиляються.
@@ -157,8 +172,8 @@ JSON snapshot недостатньо для перенесення історі�
 переданого Codex thread у incremental режимі. Id має бути непорожнім рядком.
 У full режимі метод відхиляється, бо provider id не містить підтвердженої історії;
 потрібен snapshot сесії. Вручну створений `AgentSession(service_session_id=...)`
-без binding відхиляється замість мовчазного створення нового thread. Наявність
-доступу до thread перевіряє SDK при виконанні; get_session не викликає SDK.
+без binding відхиляється замість мовчазного створення нового thread. Tool-enabled get_session без catalog binding відхиляється; відновлюйте snapshot.
+Наявність доступу до thread перевіряє SDK при виконанні; get_session не викликає SDK.
 
 ## Авторизація, lifecycle та помилки
 
@@ -179,7 +194,8 @@ SDK account повинен мати тип `chatgpt`; автоматичного
 | Failed/interrupted turn / порожня відповідь | `TurnFailedError` |
 | Runtime timeout | Вбудований `TimeoutError` |
 | Скасування asyncio task | `CancelledError`; після отримання turn handle робиться спроба interrupt |
-| Транспортні, protocol або SDK помилки | Оригінальний виняток SDK; універсальне обгортання не реалізовано |
+| Транспортні, protocol або SDK помилки | TransportError / ProtocolError / ServiceBusyError з chained cause; details у metadata.md |
+| Уже активний provider thread | ThreadBusyError; новий resume/turn не запускається |
 
 Під час скасування interrupt виконується best effort; його помилка не підміняє
 початкове скасування. Скасування до отримання turn handle не гарантує interrupt.
@@ -197,10 +213,28 @@ executor. Full-cycle тест перевіряє відсутність повт
 успадкований as_tool не передає Codex bindings в child при propagate_session.
 За замовчуванням кожний tool call має приватну сесію; це не постійна розмова
 між кількома tool calls. Перевірено базовий виклик та ізоляцію при propagation,
-але не підключення tools усередину Codex, approvals чи manager tool loop.
+а також child.as_tool через dynamic bridge. Durable approvals і manager tool loop ще не підтримано.
 
 Іменовані orchestration builders, group chat, handoff, повне відновлення workflow,
-middleware та interactive approvals ще потребують перевірки/реалізації.
+durable interactive approvals ще потребують перевірки/реалізації. Agent-level middleware
+і текстові ContextProvider підтримано в межах [pipeline.md](pipeline.md).
 
 Джерела інтерфейсів MAF: [Custom Agents](https://learn.microsoft.com/en-us/agent-framework/concepts/agents/custom-agents),
 [Workflow concepts](https://learn.microsoft.com/en-us/agent-framework/concepts/workflows/).
+
+## Готові оркестрації
+
+Sequential/Concurrent і Group Chat із selection_func перевірено офлайн.
+Group Chat використовує incremental history; full continuation зі стандартним
+AgentExecutor цього builder відхиляється. HandoffBuilder і штатний agent manager
+не підтримують CodexAgent як MAF Agent. Деталі: [orchestrations.md](orchestrations.md).
+
+## Окремий chat-client контракт
+
+CodexChatClient створює штатний MAF Agent. MAF володіє локальною історією та
+function loop; кожний Codex service call створює новий thread. Текстові
+system/developer та function content підтримуються лише цим клієнтом.
+Tools перетворюються на structured envelope з локальною перевіркою; їх
+виконує FunctionInvocationLayer MAF. Pydantic response_format із фіксованими
+object fields підтримано; невідомі опції відхиляються.
+Докладний контракт та обмеження: [chat-client.md](chat-client.md).

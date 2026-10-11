@@ -7,6 +7,11 @@
 - [Контракт поточної версії](docs/contract.md) — вхід, вихід, сесії, конфігурація та помилки.
 - [Матриця сумісності з MAF](docs/compatibility.md) — статус кожної можливості та докази.
 - [План розвитку адаптера](docs/roadmap.md) — етапи й критерії готовності.
+- [Middleware та context providers](docs/pipeline.md) — lifecycle, приклад і межі.
+- [Інструменти та погодження](docs/tools.md) — experimental bridge і контракт callback.
+- [Метадані та runtime](docs/metadata.md) — usage, категорії помилок та concurrency.
+- [CodexChatClient](docs/chat-client.md) — штатний MAF Agent, function loop, handoff і manager.
+- [Готові оркестрації](docs/orchestrations.md) — builders, режими історії та межі handoff.
 - [Результати перевірки](docs/verification.md) — офлайн та попередні live перевірки.
 
 ## Поточний результат
@@ -81,7 +86,8 @@ asyncio.run(main())
 Запити до однієї сесії та agent id серіалізуються між екземплярами в одному event loop.
 Для паралельних запусків використовуйте різні сесії; кілька незалежних процесів
 не повинні одночасно запускати один і той самий збережений thread.
-Різні session id, які вручну прив'язані до одного thread, також не синхронізуються.
+Одночасні виклики різних session id одного thread відхиляються runtime lease
+в одному event loop; міжпроцесного захисту немає.
 Назви агентів у multi-agent workflow мають бути унікальними.
 
 За замовчуванням застосовується `Sandbox.read_only`. Зміни файлів потребують
@@ -92,10 +98,13 @@ asyncio.run(main())
 
 - Підтримуються лише текстові user/assistant повідомлення. Інструкції задаються в конфігурації.
 - `stream=True` сумісний із `ResponseStream`, але повертає одну готову відповідь.
-- Динамічні tools, client kwargs, context providers, middleware та інтерактивні погодження MAF ще не підключені.
-- Керування інструментами й політикою погоджень усередині запуску залишається у Codex.
+- Підтримано agent-level middleware та текстові context providers; приклад — `examples/context_provider.py`.
+- Підтримано callable FunctionTool, provider/run tools та in-process callback approvals.
+- Chat/function middleware, HistoryProvider, непорожні invocation/client kwargs і durable approvals ще не підключені.
+- Codex керує внутрішніми інструментами; native command/file approval requests обробляє callback мосту. Без callback requested escalations відхиляються.
 - Збереження сесії MAF відновлює розмову; checkpoint-відновлення всього workflow ще не перевірено.
-- Usage, деталі викликів інструментів і поступові події SDK ще не перетворюються на типи MAF.
+- Usage передається як delta SDK counters, коли baseline відомий; доступні safe item summaries.
+- Поступові події, raw tool output та durable continuation ще не передаються.
 
 ## Перевірка через підписку
 
@@ -138,9 +147,24 @@ Runtime Codex потребує запису службового стану до
 
 Повідомлення/сесії та базові multi-agent contract tests виконано. Далі:
 
-1. Підключити agent-level middleware та context providers MAF.
-2. Опрацювати міст tools і погоджень для складнішої взаємодії агентів.
-3. Зміцнити mapping метаданих/помилок, runtime lifecycle і конкурентність.
+Agent-level middleware та текстові context providers інтегровано й перевірено офлайн.
+
+Базовий tools/approval bridge реалізовано; live approved/rejected echo та resume пройшли.
+
+Метадані, категорії SDK помилок і provider-thread lease в одному loop вже реалізовано.
+
+Sequential/Concurrent та Group Chat із Python selector перевірено офлайн;
+приклад — `examples/orchestrations.py`. Group Chat потребує incremental history.
+
+Chat-client bridge реалізовано окремим CodexChatClient: штатний MAF Agent,
+function middleware, Pydantic output, HandoffBuilder та Group Chat manager
+перевірено офлайн; фінальні live echo/handoff/manager також пройшли.
+MAF зберігає історію; кожний model call створює новий Codex thread.
+
+1. Розширити перевірки chat-client recovery та решти оркестрацій.
+2. Додати durable approval continuation.
+3. Додати reconciliation для невизначеної full історії та міжпроцесну координацію за потреби.
+
 4. Додати поступовий streaming і події за потребами керування агентом.
 5. Перевірити решту оркестрацій та підготувати відтворюваний випуск.
 

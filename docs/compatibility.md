@@ -1,6 +1,8 @@
 # Матриця сумісності
 
-Стан на 11 жовтня 2026 року для MAF 1.21.0 / Codex SDK 0.162.1.
+Стан на 11 жовтня 2026 року для MAF core 1.21.0 / orchestrations 1.3.1 / Codex SDK 0.162.1.
+Основна таблиця описує CodexAgent. Окремий CodexChatClient має ширший
+MAF chat контракт і інший життєвий цикл; його статуси наведено нижче.
 Повний контракт: [contract.md](contract.md). Порядок робіт: [roadmap.md](roadmap.md).
 
 ## Як читати статуси
@@ -25,7 +27,8 @@ MAF; **L** — попередня реальна перевірка через C
 | Мультимодальні та function content | Не реалізовано | C/T: відхиляються до старту runtime |
 | Буферизований `ResponseStream` | Підтримується | T: `test_buffered_stream_final_response`, streaming workflow |
 | Поступові text deltas | Не реалізовано | C: `_stream` очікує повний `_run` |
-| Usage, finish reason, tool events | Не реалізовано | C: `RuntimeResponse` містить лише text/thread/turn id |
+| Usage та item summaries | Частково | T/L: owned SDK counter delta, unknown без baseline, safe tool/item summaries; raw outputs відсутні |
+| Native finish reason / progressive events | Не реалізовано | Не виводяться зі status, потік ще буферизований |
 | Структурований output/schema | Не реалізовано | C/T: run options відхиляються; structured value не заповнюється |
 
 ## Стан, виконання та авторизація
@@ -42,25 +45,29 @@ MAF; **L** — попередня реальна перевірка через C
 | `get_session(service_session_id)` для Codex resume | Частково | T: `test_get_session_resumes_provider_id`; incremental. Full потребує snapshot і відхиляє голий id |
 | Versioned binding і legacy migration | Підтримується | T: version 1, міграція старого incremental binding, відхилення невідомої версії |
 | Перенесення лише JSON на інший ноутбук | Не реалізовано | Історія Codex не входить у snapshot MAF |
-| Перевірка fingerprint | Частково | T: зміна instructions; ефективна default model/зовнішня config не фіксуються |
+| Перевірка fingerprint | Частково | T: зміна instructions; відомий configured model guarded перед turn; backend rerouting/зовнішня config не повністю охоплені |
 | Послідовні виклики однієї сесії | Підтримується | T/L |
-| Конкурентні виклики однієї сесії | Частково | T: shared locks між instances в одному loop; різні session ids/процеси не синхронізуються |
+| Конкурентні виклики однієї сесії | Частково | T: shared locks між instances в одному loop; різні session ids одного thread додатково захищає runtime lease; міжпроцесного lock немає |
 | Одночасні різні сесії на реальному Codex | Не перевірено | Async архітектура є; live сценарій був послідовним |
 | Timeout/cancellation | Частково | T: interrupt і cleanup; L cancellation відсутній; до turn handle interrupt не гарантовано |
 | Збереження binding після failed turn | Підтримується | T: `test_failed_turn_preserves_binding` |
-| Єдина модель всіх помилок SDK | Не реалізовано | Частина винятків SDK передається напряму |
+| Категорії помилок SDK | Частково | T: transport/protocol/service_busy/turn, cause збережено; collector може втрачати structured error info |
 | Автоматичні retry / exactly-once | Не реалізовано | Потребують окремої політики щодо побічних ефектів |
 
 ## Розширення агента MAF
 
 | Можливість | Статус | Доказ / межа |
 | --- | --- | --- |
-| Agent-level middleware | Не реалізовано | C: `BaseAgent.run` bridge не запускає middleware pipeline |
-| Context providers / memory MAF | Не реалізовано | C: власний pipeline відсутній; існує provider-owned історія Codex |
-| Runtime `tools=` / function invocation kwargs | Не реалізовано | C/T: непорожні options відхиляються |
+| Agent-level middleware | Частково | T: стандартний AgentMiddlewareLayer, mutation/termination/transforms/errors; один handler call, без внутрішніх SDK hooks |
+| Context providers / memory MAF | Частково | T: before/after, text/instructions, scoped state/restore; HistoryProvider та middleware contributions відхиляються; callable tools підтримано мостом |
+| Тимчасові instructions run/providers | Підтримується | T: config→options→providers, явне скидання в SDK resume; live не перевірено |
+| Runtime `tools=` | Частково | T і L: FunctionTool registry, provider/run tools, immutable catalog на resume; hosted/raw callables не підтримано |
+| Function invocation kwargs | Не реалізовано | Непорожні kwargs відхиляються; контекст dynamic виклику створює міст |
 | Інструменти/MCP самого Codex | Частково | Належать runtime Codex; bridge їх не конфігурує й не мапить; tool execution L не перевірено |
 | `as_tool()` — CodexAgent як інструмент | Частково | T: базовий invoke та provider-state ізоляція; private session на call. Live/manager loop/approvals не перевірено |
-| Інтерактивний tool approval через MAF | Не реалізовано | Немає mapping SDK approval requests → MAF request/response |
+| Callback tool approvals | Частково | T/L: always_require, approve/reject/cancel, delayed in-process рішення, scope та cleanup |
+| Native command/file approvals | Частково | T: mapping, preview, default deny, non-blocking reader; native side effects live не запускались |
+| Durable MAF approval request/response | Не реалізовано | Pending callback не серіалізується; потрібен окремий workflow continuation |
 | Трасування і телеметрія MAF | Не реалізовано | Адаптер не додає telemetry layer; зовнішня інструментація — окремий механізм |
 
 ## Оркестрація
@@ -71,9 +78,9 @@ MAF; **L** — попередня реальна перевірка через C
 | Послідовний граф із кількох CodexAgent | Підтримується | T: `test_sequential_graph_passes_context_between_agents`; live multi-agent ще не перевірено |
 | Граф fan-out/fan-in | Підтримується | T: `test_fan_out_agents_overlap_and_fan_in_collects_both` доводить overlap і агрегацію; runtime fake |
 | Цикл з умовним поверненням до агента | Підтримується | T: `test_revisited_agents_in_cycle_do_not_duplicate_full_context`; режим full |
-| Іменовані Sequential/Concurrent builders | Не перевірено | Поточні тести використовують core WorkflowBuilder; окремий пакет orchestrations не встановлено |
-| Group chat | Не перевірено | Потрібні контрактні перевірки message/context режимів і manager |
-| Handoff, що потребує function tools | Не реалізовано | Немає tool bridge; сама наявність графа не реалізує agent-selected handoff |
+| Іменовані Sequential/Concurrent builders | Частково | T: справжні builders, context/author, buffered stream Sequential, concurrent barrier та aggregation; checkpoint/repeated workflow runs не перевірено |
+| Group chat | Частково | T: selection_func, три ходи з повторним учасником без дублів, buffered stream; потрібен incremental; CodexAgent як штатний manager не підтримано |
+| Handoff, що потребує function tools | Не реалізовано | C/T: HandoffBuilder вимагає MAF Agent, cloning та function middleware; відхиляє CodexAgent до runtime |
 | Magentic / planner orchestration | Не перевірено | Не перевірені manager interface та structured/control outputs |
 | Human-in-the-loop між етапами графа | Не перевірено | Це механізм MAF; не означає підтримку внутрішніх погоджень Codex |
 | Checkpoint/resume всього workflow | Не перевірено | Відновлення AgentSession перевірено; workflow checkpoint і відновлення побічних ефектів — ні |
@@ -89,3 +96,23 @@ MAF; **L** — попередня реальна перевірка через C
 - `src/maf_codex/agent.py`, `runtime.py`, `mapping.py`, `config.py`, `sessions.py`.
 - [MAF Custom Agents](https://learn.microsoft.com/en-us/agent-framework/concepts/agents/custom-agents).
 - [MAF Workflow concepts](https://learn.microsoft.com/en-us/agent-framework/concepts/workflows/).
+
+Деталі режимів та приклад: [orchestrations.md](orchestrations.md).
+
+## CodexChatClient → штатний MAF Agent
+
+| Можливість | Статус | Доказ / межа |
+| --- | --- | --- |
+| MAF Agent, cloning, локальна історія/JSON restore | Частково | T: native Agent history/restore; fresh Codex thread на кожний service call |
+| Function call/result loop | Частково | T/L: MAF виконує tools, result/error повертаються в transcript; structured envelope, один call на відповідь |
+| Chat/function middleware і invocation kwargs | Частково | T: штатні layers; function hook, context kwargs; довільні client kwargs відхиляються |
+| Pydantic response_format | Частково | T/L: SDK output_schema mapping, local validation, buffered stream; fixed fields, без open dictionary та raw schema format |
+| HandoffBuilder | Частково | T/L: Triage → Specialist, штатний interception/cloning, обидва режими відповіді; потрібен per-service history persistence |
+| Group Chat agent manager | Частково | T/L: manager вибирає учасника та завершує через structured output |
+| Usage / buffering | Частково | Fresh SDK counters; штатна MAF агрегація; progressive deltas не реалізовано |
+| Durable approvals / workflow checkpoint recovery / Magentic | Не перевірено | Потребують окремих сценаріїв |
+
+Деталі протоколу й життєвого циклу: [chat-client.md](chat-client.md).
+
+Live chat-client докази: echo, HandoffBuilder і Group Chat manager пройшли
+у фінальному 7-call сценарії; попередні duplicate tool requests описано у verification.md.

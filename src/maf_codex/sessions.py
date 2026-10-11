@@ -1,18 +1,36 @@
 """Versioned bindings and explicit full-history reconciliation."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from weakref import WeakKeyDictionary, WeakValueDictionary
 
-from .errors import HistoryMismatchError, SessionBindingError
+from .errors import HistoryMismatchError, SessionBindingError, ThreadBusyError
 
 # Share locks between agent instances in the same loop, without retaining sessions.
 _locks = WeakKeyDictionary()
+_thread_locks = WeakKeyDictionary()
 
 
 def session_lock(agent_id: str, session_id: str) -> asyncio.Lock:
     registry = _locks.setdefault(asyncio.get_running_loop(), WeakValueDictionary())
     return registry.setdefault((agent_id, session_id), asyncio.Lock())
+
+
+@asynccontextmanager
+async def thread_lease(thread_id: str | None):
+    if thread_id is None:
+        yield
+        return
+    registry = _thread_locks.setdefault(asyncio.get_running_loop(), WeakValueDictionary())
+    lock = registry.setdefault(thread_id, asyncio.Lock())
+    if lock.locked():
+        raise ThreadBusyError("Codex thread already has an active run")
+    await lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def validate_binding(binding: dict | None, fingerprint: str, history_mode: str) -> None:

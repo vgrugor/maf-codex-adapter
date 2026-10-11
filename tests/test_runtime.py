@@ -90,6 +90,29 @@ async def test_start_and_resume_pass_configuration_and_bind_thread(setup_runtime
     assert client.closed
 
 
+async def test_per_run_instructions_are_reset_on_next_resume(setup_runtime):
+    runtime, client = setup_runtime
+    await runtime.run("first", thread_id=None, bind_thread=lambda _: None, instructions="once")
+    await runtime.run("next", thread_id="new-thread", bind_thread=lambda _: None)
+    assert client.started[0]["developer_instructions"] == "once"
+    assert client.resumed[0][1]["developer_instructions"] == ""
+
+
+async def test_runtime_passes_output_schema_to_turn(setup_runtime):
+    runtime, client = setup_runtime
+    original = client.turn
+    received = []
+
+    async def turn(prompt, **kwargs):
+        received.append(kwargs)
+        return await original(prompt)
+
+    client.turn = turn
+    schema = {"type": "object", "properties": {"value": {"type": "string"}}}
+    await runtime.run("task", thread_id=None, bind_thread=lambda _: None, output_schema=schema)
+    assert received == [{"output_schema": schema}]
+
+
 @pytest.mark.parametrize(
     "status,text",
     [(TurnStatus.failed, "ok"), (TurnStatus.interrupted, "ok"), (TurnStatus.completed, None)],
